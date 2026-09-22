@@ -64,7 +64,7 @@ async function deploy(){
   const list=[];
   try{const api=await start('api',list);await waitReady(api,'http://127.0.0.1:5180/api/health');const web=await start('web',list);await waitReady(web,'http://127.0.0.1:3080');if(!await healthy('http://127.0.0.1:3080/api/health'))throw new Error('Proxy frontend ke API gagal.');}
   catch(e){await stop();throw e;}
-  console.log('\nSchema Studio siap: http://127.0.0.1:3080\nAPI: http://127.0.0.1:5180\nLog: .runtime/api.log dan .runtime/web.log\nData tersimpan di api/App_Data (dipertahankan saat redeploy).');
+  console.log('\nSchema Studio siap: http://127.0.0.1:3080\nAPI: http://127.0.0.1:5180\nLog: .runtime/api.log dan .runtime/web.log\nData tersimpan di PostgreSQL FinancialDashboard (schema_studio.projects).');
 }
 await mkdir(runtime,{recursive:true});
 let lock;

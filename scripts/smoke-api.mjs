@@ -22,5 +22,5 @@ try{
   assert.equal((await request('/api/projects/not-a-guid')).status,404);
   console.log('API smoke passed: health, CRUD, JSON round-trip, revisions, invalid keys, duplicates, dangling relations, route validation.');
 }finally{
-  if(revision){const result=await request(`/api/projects/${id}?revision=${revision}`,'DELETE');assert.equal(result.status,204);assert.equal((await request(`/api/projects/${id}`)).status,404);console.log('Test project removed from active list; recoverable .deleted backup retained.');}
+  if(revision){const result=await request(`/api/projects/${id}?revision=${revision}`,'DELETE');assert.equal(result.status,204);assert.equal((await request(`/api/projects/${id}`)).status,404);console.log('Test project soft-deleted in PostgreSQL and removed from the active list.');}
 }

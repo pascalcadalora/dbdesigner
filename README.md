@@ -50,7 +50,7 @@ Port 3080/5180 sengaja terpisah dari FinancialDashboard 3000/5080. Log ada di `.
 
 ## Penyimpanan
 
-Project disimpan di `api/App_Data/<id>.json`; folder ini dipertahankan saat deploy/redeploy. Backup folder tersebut untuk mencadangkan seluruh workspace. Penulisan file menggunakan temporary file + atomic replacement, dengan pemeriksaan nomor revisi untuk mencegah overwrite antarsesi. Hapus project mengubah namanya menjadi `<id>.json.<ticks>.deleted`; dapat dipulihkan dengan mengembalikan nama file asli ketika service dihentikan. Controller tidak menghapus data.
+Project disimpan di PostgreSQL FinancialDashboard, dalam schema khusus `schema_studio` dan tabel `schema_studio.projects`. Dokumen diagram disimpan sebagai `jsonb`, dengan pemeriksaan nomor revisi untuk mencegah overwrite antarsesi. Hapus project adalah soft-delete (`deleted_at`), sehingga data masih tersedia untuk pemulihan oleh administrator. Saat startup pertama, aplikasi mengimpor idempotent semua file lama yang masih aktif dari `api/App_Data/<id>.json`; file tersebut dibiarkan sebagai backup dan tidak lagi menjadi sumber utama. Backup PostgreSQL FinancialDashboard sekarang juga mencakup schema ini.
 
 ## Dependency referensi
 
@@ -86,7 +86,7 @@ Pengujian Windows mencakup production build, API CRUD/validasi/revisi, komponen 
 ## Struktur
 
 ```text
-api/Program.cs                 REST API, validasi, penyimpanan JSON
+api/Program.cs                 REST API, validasi, penyimpanan PostgreSQL
 web/components/Editor.tsx      State, undo/redo, autosave, project, import/export
 web/components/Diagram.tsx     Canvas, pan/zoom, drag tabel, SVG relasi, minimap
 web/components/*Dialog.tsx     Form tabel dan relasi

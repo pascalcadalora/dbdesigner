@@ -1,9 +1,14 @@
+using DotNetEnv;
+using Npgsql;
+using NpgsqlTypes;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.WebHost.ConfigureKestrel(o => o.Limits.MaxRequestBodySize = 4 * 1024 * 1024);
+var connectionString = FinancialDashboardConnection.Create(builder.Environment, builder.Configuration);
+builder.Services.AddSingleton(NpgsqlDataSource.Create(connectionString));
 builder.Services.AddSingleton<ProjectStore>();
 var app = builder.Build();
 app.Use(async (context, next) =>
@@ -11,7 +16,9 @@ app.Use(async (context, next) =>
     try { await next(context); }
     catch (JsonException) { context.Response.StatusCode = 400; await context.Response.WriteAsJsonAsync(new { error = "Format JSON tidak valid." }); }
     catch (IOException) { context.Response.StatusCode = 503; await context.Response.WriteAsJsonAsync(new { error = "Penyimpanan tidak tersedia. Coba simpan kembali." }); }
+    catch (NpgsqlException) { context.Response.StatusCode = 503; await context.Response.WriteAsJsonAsync(new { error = "PostgreSQL FinancialDashboard tidak tersedia. Periksa layanan database lalu coba kembali." }); }
 });
+await app.Services.GetRequiredService<ProjectStore>().InitializeAsync(CancellationToken.None);
 app.MapGet("/api/health", () => Results.Ok(new { status = "ok" }));
 app.MapGet("/api/projects", async (ProjectStore store) => Results.Ok(await store.List()));
 app.MapGet("/api/projects/{id:guid}", async (Guid id, ProjectStore store) =>
@@ -29,66 +36,165 @@ app.Run();
 
 sealed class ProjectStore
 {
-    readonly string folder;
-    readonly SemaphoreSlim gate = new(1, 1);
+    readonly NpgsqlDataSource dataSource;
+    readonly string legacyFolder;
     readonly JsonSerializerOptions jsonOptions = new() { WriteIndented = true };
-    public ProjectStore(IWebHostEnvironment env, IConfiguration config)
+    public ProjectStore(NpgsqlDataSource dataSource, IWebHostEnvironment env, IConfiguration config)
     {
-        folder = Path.GetFullPath(config["DataDirectory"] ?? Path.Combine(env.ContentRootPath, "App_Data"));
-        Directory.CreateDirectory(folder);
+        this.dataSource = dataSource;
+        legacyFolder = Path.GetFullPath(config["DataDirectory"] ?? Path.Combine(env.ContentRootPath, "App_Data"));
     }
-    string FilePath(Guid id) => Path.Combine(folder, $"{id:D}.json");
-    async Task<JsonObject?> Read(Guid id) => File.Exists(FilePath(id)) ? JsonNode.Parse(await File.ReadAllTextAsync(FilePath(id)))?.AsObject() : null;
+
+    public async Task InitializeAsync(CancellationToken cancellationToken)
+    {
+        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+        await using (var schema = new NpgsqlCommand("""
+            CREATE SCHEMA IF NOT EXISTS schema_studio;
+            CREATE TABLE IF NOT EXISTS schema_studio.projects (
+                project_id uuid PRIMARY KEY,
+                project_name text NOT NULL,
+                document jsonb NOT NULL,
+                revision bigint NOT NULL CHECK (revision >= 0),
+                created_at timestamptz NOT NULL DEFAULT now(),
+                updated_at timestamptz NOT NULL DEFAULT now(),
+                deleted_at timestamptz NULL
+            );
+            CREATE INDEX IF NOT EXISTS ix_schema_studio_projects_active_updated
+                ON schema_studio.projects (updated_at DESC) WHERE deleted_at IS NULL;
+            """, connection))
+            await schema.ExecuteNonQueryAsync(cancellationToken);
+        await ImportLegacyFilesAsync(connection, cancellationToken);
+    }
+
+    async Task ImportLegacyFilesAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        if (!Directory.Exists(legacyFolder)) return;
+        foreach (var file in Directory.EnumerateFiles(legacyFolder, "*.json"))
+        {
+            if (!Guid.TryParse(Path.GetFileNameWithoutExtension(file), out var id)) continue;
+            JsonObject? document;
+            try { document = JsonNode.Parse(await File.ReadAllTextAsync(file, cancellationToken))?.AsObject(); }
+            catch (JsonException) { continue; }
+            if (document is null || (string?)document["id"] != id.ToString() || string.IsNullOrWhiteSpace((string?)document["name"])) continue;
+            var revision = (long?)document["revision"] ?? 0;
+            var updatedAt = DateTimeOffset.TryParse((string?)document["updatedAt"], out var parsed) ? parsed : DateTimeOffset.UtcNow;
+            await using var import = new NpgsqlCommand("""
+                INSERT INTO schema_studio.projects (project_id, project_name, document, revision, created_at, updated_at)
+                VALUES (@id, @name, CAST(@document AS jsonb), @revision, @updatedAt, @updatedAt)
+                ON CONFLICT (project_id) DO NOTHING;
+                """, connection);
+            import.Parameters.AddWithValue("id", id);
+            import.Parameters.AddWithValue("name", (string)document["name"]!);
+            import.Parameters.Add(new NpgsqlParameter("document", NpgsqlDbType.Jsonb) { Value = document.ToJsonString(jsonOptions) });
+            import.Parameters.AddWithValue("revision", revision);
+            import.Parameters.AddWithValue("updatedAt", updatedAt);
+            await import.ExecuteNonQueryAsync(cancellationToken);
+        }
+    }
+
     public async Task<JsonObject?> Get(Guid id)
     {
-        await gate.WaitAsync();
-        try { return await Read(id); } finally { gate.Release(); }
+        await using var connection = await dataSource.OpenConnectionAsync();
+        await using var command = new NpgsqlCommand("""
+            SELECT document::text FROM schema_studio.projects
+            WHERE project_id = @id AND deleted_at IS NULL;
+            """, connection);
+        command.Parameters.AddWithValue("id", id);
+        var document = await command.ExecuteScalarAsync();
+        return document is string json ? JsonNode.Parse(json)?.AsObject() : null;
     }
-    public async Task<List<object>> List()
+    public async Task<List<ProjectSummary>> List()
     {
-        await gate.WaitAsync();
-        try
-        {
-            var items = new List<object>();
-            foreach (var path in Directory.EnumerateFiles(folder, "*.json"))
-            {
-                if (!Guid.TryParse(Path.GetFileNameWithoutExtension(path), out var id)) continue;
-                var p = await Read(id);
-                if (p != null) items.Add(new { id, name = (string?)p["name"], updatedAt = (string?)p["updatedAt"], revision = (long?)p["revision"] ?? 0, tableCount = p["tables"]!.AsArray().Count });
-            }
-            return items;
-        }
-        finally { gate.Release(); }
+        await using var connection = await dataSource.OpenConnectionAsync();
+        await using var command = new NpgsqlCommand("""
+            SELECT project_id, project_name, revision, updated_at,
+                   jsonb_array_length(document->'tables') AS table_count
+            FROM schema_studio.projects WHERE deleted_at IS NULL
+            ORDER BY updated_at DESC;
+            """, connection);
+        await using var reader = await command.ExecuteReaderAsync();
+        var items = new List<ProjectSummary>();
+        while (await reader.ReadAsync())
+            items.Add(new ProjectSummary(reader.GetGuid(0), reader.GetString(1), reader.GetInt64(2), reader.GetFieldValue<DateTimeOffset>(3).ToString("O"), reader.GetInt32(4)));
+        return items;
     }
     public async Task<JsonObject?> Save(Guid id, JsonObject body)
     {
-        await gate.WaitAsync();
-        try
+        var expectedRevision = (long?)body["revision"] ?? -1;
+        await using var connection = await dataSource.OpenConnectionAsync();
+        var now = DateTimeOffset.UtcNow;
+        body["revision"] = expectedRevision + 1;
+        body["updatedAt"] = now.ToString("O");
+        var document = body.ToJsonString(jsonOptions);
+        await using var update = new NpgsqlCommand("""
+            UPDATE schema_studio.projects
+            SET project_name = @name, document = CAST(@document AS jsonb), revision = revision + 1, updated_at = @updatedAt
+            WHERE project_id = @id AND revision = @revision AND deleted_at IS NULL
+            RETURNING revision, updated_at;
+            """, connection);
+        update.Parameters.AddWithValue("id", id);
+        update.Parameters.AddWithValue("name", (string)body["name"]!);
+        update.Parameters.Add(new NpgsqlParameter("document", NpgsqlDbType.Jsonb) { Value = document });
+        update.Parameters.AddWithValue("revision", expectedRevision);
+        update.Parameters.AddWithValue("updatedAt", now);
+        await using var reader = await update.ExecuteReaderAsync();
+        if (await reader.ReadAsync())
         {
-            var previous = await Read(id);
-            var revision = (long?)previous?["revision"] ?? 0;
-            if ((long?)body["revision"] != revision) return null;
-            body["revision"] = revision + 1;
-            body["updatedAt"] = DateTimeOffset.UtcNow.ToString("O");
-            var temporary = FilePath(id) + ".tmp";
-            await File.WriteAllTextAsync(temporary, body.ToJsonString(jsonOptions));
-            File.Move(temporary, FilePath(id), overwrite: true);
+            body["revision"] = reader.GetInt64(0);
+            body["updatedAt"] = reader.GetFieldValue<DateTimeOffset>(1).ToString("O");
             return body;
         }
-        finally { gate.Release(); }
+        await reader.CloseAsync();
+        if (expectedRevision != 0) return null;
+        await using var insert = new NpgsqlCommand("""
+            INSERT INTO schema_studio.projects (project_id, project_name, document, revision, created_at, updated_at)
+            VALUES (@id, @name, CAST(@document AS jsonb), 1, @updatedAt, @updatedAt)
+            ON CONFLICT (project_id) DO NOTHING
+            RETURNING revision, updated_at;
+            """, connection);
+        insert.Parameters.AddWithValue("id", id);
+        insert.Parameters.AddWithValue("name", (string)body["name"]!);
+        insert.Parameters.Add(new NpgsqlParameter("document", NpgsqlDbType.Jsonb) { Value = document });
+        insert.Parameters.AddWithValue("updatedAt", now);
+        await using var inserted = await insert.ExecuteReaderAsync();
+        if (!await inserted.ReadAsync()) return null;
+        body["revision"] = inserted.GetInt64(0);
+        body["updatedAt"] = inserted.GetFieldValue<DateTimeOffset>(1).ToString("O");
+        return body;
     }
     public async Task<bool> Delete(Guid id, long revision)
     {
-        await gate.WaitAsync();
-        try
-        {
-            var previous = await Read(id);
-            if (previous == null || (long?)previous["revision"] != revision) return false;
-            // Keep a recoverable copy outside the active project list.
-            File.Move(FilePath(id), FilePath(id) + $".{DateTime.UtcNow.Ticks}.deleted");
-            return true;
-        }
-        finally { gate.Release(); }
+        await using var connection = await dataSource.OpenConnectionAsync();
+        await using var command = new NpgsqlCommand("""
+            UPDATE schema_studio.projects SET deleted_at = now()
+            WHERE project_id = @id AND revision = @revision AND deleted_at IS NULL;
+            """, connection);
+        command.Parameters.AddWithValue("id", id);
+        command.Parameters.AddWithValue("revision", revision);
+        return await command.ExecuteNonQueryAsync() == 1;
+    }
+}
+
+sealed record ProjectSummary(Guid Id, string Name, long Revision, string UpdatedAt, int TableCount);
+
+static class FinancialDashboardConnection
+{
+    public static string Create(IWebHostEnvironment env, IConfiguration config)
+    {
+        var configured = config["SchemaStudio:ConnectionString"] ?? Environment.GetEnvironmentVariable("SCHEMA_STUDIO_CONNECTION_STRING");
+        if (!string.IsNullOrWhiteSpace(configured)) return configured;
+        var financialRoot = Path.GetFullPath(config["FinancialDashboardDirectory"] ?? Environment.GetEnvironmentVariable("FINANCIAL_DASHBOARD_DIRECTORY") ?? Path.Combine(env.ContentRootPath, "..", "..", "FinancialDashboard"));
+        var envFile = Path.Combine(financialRoot, ".env");
+        if (!File.Exists(envFile)) throw new InvalidOperationException($"Konfigurasi FinancialDashboard tidak ditemukan: {envFile}. Atur FINANCIAL_DASHBOARD_DIRECTORY atau SCHEMA_STUDIO_CONNECTION_STRING.");
+        Env.Load(envFile);
+        var password = Environment.GetEnvironmentVariable("POSTGRES_PASSWORD");
+        if (string.IsNullOrWhiteSpace(password)) throw new InvalidOperationException("POSTGRES_PASSWORD FinancialDashboard belum dikonfigurasi.");
+        var active = (Environment.GetEnvironmentVariable("ACTIVE_DB") ?? "LOCAL").Split('#')[0].Trim().ToUpperInvariant();
+        if (active is not ("LOCAL" or "SERVER")) throw new InvalidOperationException("ACTIVE_DB FinancialDashboard harus LOCAL atau SERVER.");
+        var host = active == "SERVER" ? Environment.GetEnvironmentVariable("POSTGRES_SERVER_HOST") ?? "127.0.0.1" : Environment.GetEnvironmentVariable("POSTGRES_LOCAL_HOST") ?? Environment.GetEnvironmentVariable("POSTGRES_HOST") ?? "localhost";
+        var portValue = active == "SERVER" ? Environment.GetEnvironmentVariable("POSTGRES_SERVER_PORT") ?? "15432" : Environment.GetEnvironmentVariable("POSTGRES_LOCAL_PORT") ?? Environment.GetEnvironmentVariable("POSTGRES_PORT") ?? "5432";
+        if (!int.TryParse(portValue, out var port) || port is < 1 or > 65535) throw new InvalidOperationException("Port PostgreSQL FinancialDashboard tidak valid.");
+        return new NpgsqlConnectionStringBuilder { Host = host, Port = port, Database = Environment.GetEnvironmentVariable("POSTGRES_DB") ?? "financial_dashboard", Username = Environment.GetEnvironmentVariable("POSTGRES_USER") ?? "financial_app", Password = password, Pooling = true, MaxPoolSize = 25 }.ConnectionString;
     }
 }
 
