@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const TYPES = ['int', 'bigint', 'uuid', 'varchar(255)', 'text', 'boolean', 'decimal(18,2)', 'date', 'timestamp', 'json'] as const;
+export const TYPES = ['int', 'bigint', 'uuid', 'varchar(3)', 'varchar(255)', 'text', 'boolean', 'decimal(18,2)', 'decimal(19,4)', 'decimal(24,8)', 'decimal(38,18)', 'date', 'timestamp', 'json'] as const;
 export const COLORS = ['#6d5ce7', '#289d8e', '#db9843', '#d56583', '#558bc5', '#8a70ad'];
 const identifier = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,62}$/, 'Gunakan huruf, angka, underscore; awali dengan huruf/underscore (maks. 63).');
 export const columnSchema = z.object({ id: z.uuid(), name: identifier, type: z.enum(TYPES), primaryKey: z.boolean(), nullable: z.boolean(), unique: z.boolean(), defaultValue: z.string().max(500), displayName: z.string().trim().max(120).default(''), description: z.string().max(2000).default(''), systemGenerated: z.boolean().default(false), generationPattern: z.string().trim().max(200).default('') });
@@ -41,9 +41,9 @@ export function demoProject(): Project {
   };
   const customers = make('customers', 40, 60, COLORS[0], [['full_name','varchar(255)'],['email','varchar(255)'],['created_at','timestamp']]);
   customers.columns[2].unique = true; customers.note = 'Data pelanggan dan informasi kontak.';
-  const orders = make('orders', 440, 160, COLORS[1], [['customer_id','int'],['status','varchar(255)'],['total','decimal(18,2)'],['created_at','timestamp']]);
-  const items = make('order_items', 840, 160, COLORS[2], [['order_id','int'],['product_id','int'],['quantity','int'],['unit_price','decimal(18,2)']]);
-  const products = make('products', 440, 540, COLORS[4], [['category_id','int'],['name','varchar(255)'],['price','decimal(18,2)'],['stock','int']]);
+  const orders = make('orders', 440, 160, COLORS[1], [['customer_id','int'],['status','varchar(255)'],['total','decimal(19,4)'],['currency_code','varchar(3)'],['created_at','timestamp']]);
+  const items = make('order_items', 840, 160, COLORS[2], [['order_id','int'],['product_id','int'],['quantity','int'],['unit_price','decimal(19,4)']]);
+  const products = make('products', 440, 540, COLORS[4], [['category_id','int'],['name','varchar(255)'],['price','decimal(19,4)'],['stock','int']]);
   const categories = make('categories', 40, 490, COLORS[3], [['name','varchar(255)'],['description','text']]);
   const rel = (a: Table, b: Table, col: number): Relation => ({ id: uid(), fromTable: a.id, fromColumn: a.columns[0].id, toTable: b.id, toColumn: b.columns[col].id, kind: 'one-to-many', joinedColumns: [], showForeignKey: true });
   p.tables = [customers, orders, items, products, categories];
@@ -120,7 +120,7 @@ export function sqlExport(p: Project): string {
     if (!c.defaultValue.trim()) return '';
     const v = c.defaultValue.trim();
     if (v.toUpperCase() === 'CURRENT_TIMESTAMP' && ['date','timestamp'].includes(c.type)) return ' DEFAULT CURRENT_TIMESTAMP';
-    if (['int','bigint','decimal(18,2)'].includes(c.type)) { if (!/^-?\d+(\.\d+)?$/.test(v)) throw new Error(`Default ${c.name} harus angka.`); return ` DEFAULT ${v}`; }
+    if (c.type === 'int' || c.type === 'bigint' || c.type.startsWith('decimal(')) { if (!/^-?\d+(\.\d+)?$/.test(v)) throw new Error(`Default ${c.name} harus angka.`); return ` DEFAULT ${v}`; }
     if (c.type === 'boolean') { if (!/^(true|false|0|1)$/i.test(v)) throw new Error(`Default ${c.name} harus true/false.`); const yes = /^(true|1)$/i.test(v); return ` DEFAULT ${p.dialect === 'postgres' ? String(yes).toUpperCase() : yes ? '1' : '0'}`; }
     return ` DEFAULT '${v.replaceAll("'", "''")}'`;
   };

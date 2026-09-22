@@ -201,7 +201,7 @@ static class FinancialDashboardConnection
 static class SchemaValidation
 {
     static readonly Regex Identifier = new("^[A-Za-z_][A-Za-z0-9_]{0,62}$", RegexOptions.CultureInvariant);
-    static readonly HashSet<string> Types = ["int", "bigint", "uuid", "varchar(255)", "text", "boolean", "decimal(18,2)", "date", "timestamp", "json"];
+    static readonly HashSet<string> Types = ["int", "bigint", "uuid", "varchar(3)", "varchar(255)", "text", "boolean", "decimal(18,2)", "decimal(19,4)", "decimal(24,8)", "decimal(38,18)", "date", "timestamp", "json"];
     static bool Name(string? value) => value != null && Identifier.IsMatch(value);
     public static string? Check(JsonObject p, Guid id)
     {
