@@ -1,0 +1,10 @@
+web/node_modules/
+web/.next/
+web/out/
+web/tsconfig.tsbuildinfo
+api/bin/
+api/obj/
+api/App_Data/
+.logs/
+.runtime/
+*.user
