@@ -53,10 +53,11 @@ export default function Diagram({project, selection, onSelect, onMove, onView, o
     const zoom = Math.max(.2, Math.min(2, view.zoom * factor));
     onView({zoom, x: x - (x - view.x) * zoom / view.zoom, y: y - (y - view.y) * zoom / view.zoom});
   }
+  const wheelEvent = useEffectEvent((event: WheelEvent) => { event.preventDefault(); const r=root.current?.getBoundingClientRect(); if(r)zoomBy(event.deltaY > 0 ? .94 : 1.06,event.clientX-r.left,event.clientY-r.top); });
+  useEffect(()=>{const el=root.current;if(!el)return;const handler=(event:WheelEvent)=>wheelEvent(event);el.addEventListener('wheel',handler,{passive:false});return()=>el.removeEventListener('wheel',handler);},[]);
   const bounds = {x: Math.min(0,...tables.map(t=>t.x))-60, y: Math.min(0,...tables.map(t=>t.y))-60, right: Math.max(1000,...tables.map(t=>t.x+270))+60, bottom: Math.max(750,...tables.map(t=>t.y+tableHeight(t)))+60};
   return <div ref={root} className={`canvas ${tool === 'pan' ? 'pan-tool' : ''} ${drag ? 'dragging' : ''}`} aria-label="Canvas diagram database"
     style={{backgroundSize:`${20*currentView.zoom}px ${20*currentView.zoom}px`, backgroundPosition:`${currentView.x}px ${currentView.y}px`}}
-    onWheel={e=>{ const r=root.current!.getBoundingClientRect(); zoomBy(e.deltaY > 0 ? .94 : 1.06, e.clientX-r.left,e.clientY-r.top); }}
     onPointerDown={e=>{ if(e.button!==0&&e.button!==1)return; capture(e); onSelect(null); setDrag({kind:'pan',sx:e.clientX,sy:e.clientY,ox:view.x,oy:view.y,x:view.x,y:view.y}); }} onPointerMove={move} onPointerUp={end} onPointerCancel={()=>setDrag(null)}>
     <div className="canvas-caption"><span className="live-dot"/> VISUAL WORKSPACE <span>/</span> {project.name}</div>
     <div className="diagram-world" style={{transform:`translate(${currentView.x}px, ${currentView.y}px) scale(${currentView.zoom})`}}>

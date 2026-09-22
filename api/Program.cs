@@ -215,7 +215,7 @@ static class SchemaValidation
             if (p["snap"] is not JsonValue || !p["snap"]!.AsValue().TryGetValue<bool>(out _)) return "Pengaturan grid tidak valid.";
             var ids = new HashSet<string>();
             var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var columns = new Dictionary<string, (string Table, string Type, bool Key, bool Unique, bool Nullable)>();
+            var columns = new Dictionary<string, (string Table, string Name, string Type, bool Key, bool Unique, bool Nullable)>();
             foreach (var item in tables)
             {
                 var t = item!.AsObject(); var tid = (string)t["id"]!;
@@ -247,7 +247,7 @@ static class SchemaValidation
                         if (string.IsNullOrWhiteSpace(pattern) || pattern.Contains('\n') || pattern.Contains('\r') || !Regex.IsMatch(pattern, token) || Regex.IsMatch(Regex.Replace(pattern, token, ""), "[{}]"))
                             return $"Format nilai otomatis {t["name"]}.{c["name"]} tidak valid. Gunakan {{SEQ}}, {{SEQ:1}}–{{SEQ:9}}, {{DD}}, {{MM}}, atau {{YYYY}}.";
                     }
-                    columns.Add(cid, (tid, type, pk && cols.Count(x => (bool)x!["primaryKey"]!) == 1, unique, nullable));
+                    columns.Add(cid, (tid, (string)c["name"]!, type, pk && cols.Count(x => (bool)x!["primaryKey"]!) == 1, unique, nullable));
                 }
             }
             var endpoints = new HashSet<string>();
@@ -259,6 +259,16 @@ static class SchemaValidation
                 if (!columns.TryGetValue(from, out var a) || !columns.TryGetValue(to, out var b) || a.Table != (string?)r["fromTable"] || b.Table != (string?)r["toTable"] || from == to) return "Endpoint relasi tidak ditemukan.";
                 if (a.Type != b.Type || !(a.Key || a.Unique) || !endpoints.Add(to)) return "FK harus bertipe sama, mereferensikan PK tunggal/UNIQUE, dan hanya memiliki satu referensi.";
                 if ((string?)r["kind"] == "one-to-one" && !(b.Key || b.Unique)) return "Kolom FK one-to-one harus UNIQUE.";
+                if (!r.ContainsKey("joinedColumns")) r["joinedColumns"] = new JsonArray();
+                if (!r.ContainsKey("showForeignKey")) r["showForeignKey"] = true;
+                if (r["joinedColumns"] is not JsonArray joined || r["showForeignKey"] is not JsonValue visible || !visible.TryGetValue<bool>(out _)) return "Pengaturan hasil join tidak valid.";
+                var joinedIds = new HashSet<string>();
+                foreach (var joinedValue in joined)
+                {
+                    var joinedId = (string?)joinedValue;
+                    if (joinedId == null || !joinedIds.Add(joinedId) || !columns.TryGetValue(joinedId, out var joinedColumn) || joinedColumn.Table != a.Table) return "Kolom hasil join tidak valid.";
+                    if (columns.Values.Any(column => column.Table == b.Table && string.Equals(column.Name, joinedColumn.Name, StringComparison.OrdinalIgnoreCase))) return $"Kolom {joinedColumn.Name} sudah ada pada tabel tujuan; tidak dapat ditambahkan dari hasil join.";
+                }
             }
             return null;
         }
