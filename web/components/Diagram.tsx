@@ -8,6 +8,8 @@ type Props = { project: Project; selection: Selection; onSelect: (s: Selection) 
 type Drag = { kind: 'table'; id: string; sx: number; sy: number; ox: number; oy: number; x: number; y: number } | { kind: 'pan'; sx: number; sy: number; ox: number; oy: number; x: number; y: number } | { kind: 'link'; table: string; column: string; x: number; y: number; sx: number; sy: number };
 export default function Diagram({project, selection, onSelect, onMove, onView, onConnect, onEdit, onSnap, onAdd, fitSignal}: Props) {
   const root = useRef<HTMLDivElement>(null);
+  const touches = useRef(new Map<number,{x:number;y:number}>());
+  const gesture = useRef<{view:Project['viewport'];center:{x:number;y:number};distance:number;last:Project['viewport']}|null>(null);
   const [drag, setDrag] = useState<Drag | null>(null);
   const [tool, setTool] = useState<'select' | 'pan'>('select');
   const [size, setSize] = useState({width:900,height:600});
@@ -29,8 +31,25 @@ export default function Diagram({project, selection, onSelect, onMove, onView, o
     observer.observe(el);return()=>observer.disconnect();
   },[]);
   function point(e: {clientX: number; clientY: number}) { const r = root.current!.getBoundingClientRect(); return {x: (e.clientX - r.left - view.x) / view.zoom, y: (e.clientY - r.top - view.y) / view.zoom}; }
-  function capture(e: PointerEvent) { e.preventDefault(); e.stopPropagation(); root.current?.setPointerCapture(e.pointerId); }
+  function localPoint(e: {clientX:number;clientY:number}) { const r=root.current!.getBoundingClientRect(); return {x:e.clientX-r.left,y:e.clientY-r.top}; }
+  function beginTouch(e: PointerEvent) {
+    if (e.pointerType !== 'touch') return false;
+    touches.current.set(e.pointerId,localPoint(e)); root.current?.setPointerCapture(e.pointerId);
+    if (touches.current.size === 2) { const [first,second]=[...touches.current.values()]; const center={x:(first.x+second.x)/2,y:(first.y+second.y)/2}; const distance=Math.hypot(first.x-second.x,first.y-second.y); gesture.current={view,center,distance,last:view}; setDrag(null); }
+    return true;
+  }
+  function capture(e: PointerEvent) { e.preventDefault(); e.stopPropagation(); beginTouch(e); root.current?.setPointerCapture(e.pointerId); }
   function move(e: PointerEvent) {
+    if (e.pointerType === 'touch') {
+      if (!touches.current.has(e.pointerId)) return;
+      touches.current.set(e.pointerId,localPoint(e));
+      if (touches.current.size < 2 || !gesture.current) return;
+      const [first,second]=[...touches.current.values()]; const center={x:(first.x+second.x)/2,y:(first.y+second.y)/2}; const distance=Math.hypot(first.x-second.x,first.y-second.y); const start=gesture.current;
+      // Parallel two-finger movement keeps the distance stable, so it pans only. Pinch changes the distance.
+      const rawFactor=distance/start.distance; const factor=Math.abs(rawFactor-1)>.018?rawFactor:1; const zoom=Math.max(.2,Math.min(2,start.view.zoom*factor)); const scale=zoom/start.view.zoom;
+      const next={zoom,x:start.view.x+(center.x-start.center.x)-(start.center.x-start.view.x)*(scale-1),y:start.view.y+(center.y-start.center.y)-(start.center.y-start.view.y)*(scale-1)};
+      start.last=next; onView(next); return;
+    }
     if (!drag) return;
     if (drag.kind === 'link') { setDrag({...drag, ...point(e)}); return; }
     const scale = drag.kind === 'table' ? view.zoom : 1;
@@ -39,6 +58,7 @@ export default function Diagram({project, selection, onSelect, onMove, onView, o
     setDrag({...drag, x, y});
   }
   function end(e: PointerEvent) {
+    if (e.pointerType === 'touch') { touches.current.delete(e.pointerId); if (gesture.current && touches.current.size<2) { onView(gesture.current.last); gesture.current=null; } if (root.current?.hasPointerCapture(e.pointerId)) root.current.releasePointerCapture(e.pointerId); return; }
     if (drag?.kind === 'table' && (drag.x !== drag.ox || drag.y !== drag.oy)) onMove(drag.id, drag.x, drag.y);
     if (drag?.kind === 'pan') onView({...view, x: drag.x, y: drag.y});
     if (drag?.kind === 'link') {
@@ -58,7 +78,7 @@ export default function Diagram({project, selection, onSelect, onMove, onView, o
   const bounds = {x: Math.min(0,...tables.map(t=>t.x))-60, y: Math.min(0,...tables.map(t=>t.y))-60, right: Math.max(1000,...tables.map(t=>t.x+270))+60, bottom: Math.max(750,...tables.map(t=>t.y+tableHeight(t)))+60};
   return <div ref={root} className={`canvas ${tool === 'pan' ? 'pan-tool' : ''} ${drag ? 'dragging' : ''}`} aria-label="Canvas diagram database"
     style={{backgroundSize:`${20*currentView.zoom}px ${20*currentView.zoom}px`, backgroundPosition:`${currentView.x}px ${currentView.y}px`}}
-    onPointerDown={e=>{ if(e.button!==0&&e.button!==1)return; capture(e); onSelect(null); setDrag({kind:'pan',sx:e.clientX,sy:e.clientY,ox:view.x,oy:view.y,x:view.x,y:view.y}); }} onPointerMove={move} onPointerUp={end} onPointerCancel={()=>setDrag(null)}>
+    onPointerDown={e=>{ if(beginTouch(e)){onSelect(null);return;} if(e.button!==0&&e.button!==1)return; capture(e); onSelect(null); setDrag({kind:'pan',sx:e.clientX,sy:e.clientY,ox:view.x,oy:view.y,x:view.x,y:view.y}); }} onPointerMove={move} onPointerUp={end} onPointerCancel={e=>{touches.current.delete(e.pointerId);if(touches.current.size<2)gesture.current=null;setDrag(null);}}>
     <div className="canvas-caption"><span className="live-dot"/> VISUAL WORKSPACE <span>/</span> {project.name}</div>
     <div className="diagram-world" style={{transform:`translate(${currentView.x}px, ${currentView.y}px) scale(${currentView.zoom})`}}>
       <svg className="edges" aria-label="Garis relasi">
